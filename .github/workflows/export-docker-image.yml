@@ -1,0 +1,81 @@
+name: 通用Docker镜像离线打包工作流
+on:
+  workflow_dispatch:
+    # 自定义输入参数：在触发工作流时填写
+    inputs:
+      image-repo:
+        description: '镜像仓库地址（含用户名/仓库名，例：shadowsocks/shadowsocks-libev）'
+        required: true
+        type: string
+      image-tag:
+        description: '镜像标签（例：latest、v1.0.0）'
+        required: true
+        type: string
+        default: 'latest'  # 默认值：latest
+      image-arch:
+        description: '镜像架构（例：linux/amd64、linux/arm64）'
+        required: true
+        type: string
+        default: 'linux/amd64'  # 默认架构：amd64
+      output-name:
+        description: '输出文件前缀（例：shadowsocks、clash）'
+        required: true
+        type: string
+        default: 'docker-image'  # 默认前缀
+
+jobs:
+  export-image:
+    runs-on: ubuntu-latest
+    steps:
+      # 步骤1：拉取指定架构、指定版本的Docker镜像
+      - name: 拉取目标Docker镜像
+        run: |
+          set -e  # 出错立即退出
+          echo "开始拉取镜像：${{ inputs.image-repo }}:${{ inputs.image-tag }}（架构：${{ inputs.image-arch }}）"
+          # 强制拉取指定架构的镜像，避免本地缓存冲突
+          docker pull --platform ${{ inputs.image-arch }} ${{ inputs.image-repo }}:${{ inputs.image-tag }}
+          echo "镜像拉取成功！"
+
+      # 步骤2：验证镜像是否存在，并存入环境变量
+      - name: 检测镜像有效性
+        run: |
+          # 拼接完整镜像名（仓库地址:标签）
+          FULL_IMAGE="${{ inputs.image-repo }}:${{ inputs.image-tag }}"
+          # 检查镜像是否存在
+          if docker image inspect $FULL_IMAGE >/dev/null 2>&1; then
+            echo "镜像验证通过：$FULL_IMAGE"
+            echo "FULL_IMAGE=$FULL_IMAGE" >> $GITHUB_ENV  # 存入环境变量供后续使用
+          else
+            echo "错误：镜像 $FULL_IMAGE 不存在！"
+            exit 1  # 验证失败，终止工作流
+          fi
+
+      # 步骤3：将镜像保存为离线tar文件
+      - name: 导出镜像为tar包
+        run: |
+          # 拼接输出文件名（前缀-架构-标签.tar）
+          TAR_FILENAME="${{ inputs.output-name }}-${{ inputs.image-arch }}-${{ inputs.image-tag }}.tar"
+          echo "开始导出镜像到：$TAR_FILENAME"
+          docker save -o $TAR_FILENAME ${{ env.FULL_IMAGE }}
+          # 输出文件大小，确认导出成功
+          ls -lh $TAR_FILENAME
+          echo "TAR_FILENAME=$TAR_FILENAME" >> $GITHUB_ENV  # 存入环境变量
+
+      # 步骤4：压缩tar包（减小文件体积，方便下载）
+      - name: 压缩tar包（gzip）
+        run: |
+          echo "开始压缩文件：${{ env.TAR_FILENAME }}"
+          gzip -f ${{ env.TAR_FILENAME }}  # -f：强制覆盖已存在的压缩包
+          # 拼接压缩后的文件名
+          GZ_FILENAME="${{ env.TAR_FILENAME }}.gz"
+          ls -lh $GZ_FILENAME
+          echo "GZ_FILENAME=$GZ_FILENAME" >> $GITHUB_ENV
+
+      # 步骤5：上传压缩包为GitHub产物（可下载）
+      - name: 上传离线镜像压缩包
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.output-name }}-offline-image  # 产物名称（在GitHub页面显示）
+          path: ${{ env.GZ_FILENAME }}  # 要上传的文件路径
+          retention-days: 90  # 产物保留90天（可自定义，默认90天）
+          if-no-files-found: error  # 若文件不存在，标记工作流失败
